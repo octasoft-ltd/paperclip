@@ -1989,25 +1989,21 @@ export function heartbeatService(db: Db) {
         });
         await releaseIssueExecutionAndPromote(failedRun);
 
+        // Clear the session so the next heartbeat starts fresh instead of
+        // resuming a potentially stale/corrupt session from this failed run.
         await updateRuntimeState(agent, failedRun, {
           exitCode: null,
           signal: null,
           timedOut: false,
           errorMessage: message,
         }, {
-          legacySessionId: runtimeForAdapter.sessionId,
+          legacySessionId: null,
         });
 
-        if (taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
-          await upsertTaskSession({
-            companyId: agent.companyId,
-            agentId: agent.id,
-            adapterType: agent.adapterType,
+        if (taskKey) {
+          await clearTaskSessions(agent.companyId, agent.id, {
             taskKey,
-            sessionParamsJson: previousSessionParams,
-            sessionDisplayId: previousSessionDisplayId,
-            lastRunId: failedRun.id,
-            lastError: message,
+            adapterType: agent.adapterType,
           });
         }
       }
