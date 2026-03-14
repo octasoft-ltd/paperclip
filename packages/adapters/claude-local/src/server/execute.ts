@@ -48,7 +48,7 @@ async function resolvePaperclipSkillsDir(): Promise<string | null> {
  * the repo's `skills/` directory, so `--add-dir` makes Claude Code discover
  * them as proper registered skills.
  */
-async function buildSkillsDir(): Promise<string> {
+async function buildSkillsDir(onLog: AdapterExecutionContext["onLog"]): Promise<string> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-skills-"));
   const target = path.join(tmp, ".claude", "skills");
   await fs.mkdir(target, { recursive: true });
@@ -62,8 +62,11 @@ async function buildSkillsDir(): Promise<string> {
           path.join(skillsDir, entry.name),
           path.join(target, entry.name),
         );
-      } catch {
-        // Skill link failure is non-fatal; continue with remaining skills.
+      } catch (err) {
+        await onLog(
+          "stderr",
+          `[paperclip] Failed to link Claude skill "${entry.name}": ${err instanceof Error ? err.message : String(err)}\n`,
+        );
       }
     }
   }
@@ -342,7 +345,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     extraArgs,
   } = runtimeConfig;
   const billingType = resolveClaudeBillingType(env);
-  const skillsDir = await buildSkillsDir();
+  const skillsDir = await buildSkillsDir(onLog);
 
   // When instructionsFilePath is configured, create a combined temp file that
   // includes both the file content and the path directive, so we only need
