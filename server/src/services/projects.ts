@@ -370,6 +370,20 @@ export function projectService(db: Db) {
         projectData.color = nextColor;
       }
 
+      // Default to isolated git worktree execution if no policy provided
+      if (!projectData.executionWorkspacePolicy) {
+        projectData.executionWorkspacePolicy = {
+          enabled: true,
+          defaultMode: "isolated",
+          allowIssueOverride: true,
+          workspaceStrategy: {
+            type: "git_worktree",
+            branchTemplate: "{{issue.identifier}}-{{slug}}",
+            worktreeParentDir: ".paperclip/worktrees",
+          },
+        };
+      }
+
       const existingProjects = await db
         .select({ id: projects.id, name: projects.name })
         .from(projects)
