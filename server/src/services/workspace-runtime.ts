@@ -222,6 +222,22 @@ function resolveConfiguredPath(value: string, baseDir: string): string {
   return path.resolve(baseDir, value);
 }
 
+export function resolveShell(): string {
+  return process.env.SHELL?.trim() || (process.platform === "win32" ? "sh" : "/bin/sh");
+}
+
+export function buildSafeDirectoryEnv(cwd: string): Record<string, string> {
+  const env: Record<string, string> = Object.fromEntries(
+    Object.entries(process.env).filter((e): e is [string, string] => e[1] != null),
+  );
+  const parsed = parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
+  const existingCount = Math.max(0, Number.isFinite(parsed) ? parsed : 0);
+  env.GIT_CONFIG_COUNT = String(existingCount + 1);
+  env[`GIT_CONFIG_KEY_${existingCount}`] = "safe.directory";
+  env[`GIT_CONFIG_VALUE_${existingCount}`] = cwd;
+  return env;
+}
+
 function formatCommandForDisplay(command: string, args: string[]) {
   return [command, ...args]
     .map((part) => (/^[A-Za-z0-9_./:-]+$/.test(part) ? part : JSON.stringify(part)))
@@ -255,10 +271,12 @@ async function executeProcess(input: {
 }
 
 async function runGit(args: string[], cwd: string): Promise<string> {
+  const gitEnv = buildSafeDirectoryEnv(cwd);
   const proc = await executeProcess({
     command: "git",
     args,
     cwd,
+    env: gitEnv as NodeJS.ProcessEnv,
   });
   if (proc.code !== 0) {
     throw new Error(proc.stderr.trim() || proc.stdout.trim() || `git ${args.join(" ")} failed`);
@@ -327,7 +345,7 @@ async function runWorkspaceCommand(input: {
   env: NodeJS.ProcessEnv;
   label: string;
 }) {
-  const shell = process.env.SHELL?.trim() || "/bin/sh";
+  const shell = resolveShell();
   const proc = await executeProcess({
     command: shell,
     args: ["-c", input.command],
@@ -1122,7 +1140,7 @@ async function startLocalRuntimeService(input: {
     const portEnvKey = asString(portConfig.envKey, "PORT");
     env[portEnvKey] = String(port);
   }
-  const shell = process.env.SHELL?.trim() || "/bin/sh";
+  const shell = resolveShell();
   const child = spawn(shell, ["-lc", command], {
     cwd: serviceCwd,
     env,
