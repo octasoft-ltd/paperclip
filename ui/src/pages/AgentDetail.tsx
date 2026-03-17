@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, Link, Navigate, useBeforeUnload } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { agentsApi, type AgentKey, type ClaudeLoginResult } from "../api/agents";
+import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { ApiError } from "../api/client";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
@@ -17,7 +18,6 @@ import { AgentConfigForm } from "../components/AgentConfigForm";
 import { PageTabBar } from "../components/PageTabBar";
 import { adapterLabels, roleLabels } from "../components/agent-config-primitives";
 import { getUIAdapter, buildTranscript } from "../adapters";
-import type { TranscriptEntry } from "../adapters";
 import { StatusBadge } from "../components/StatusBadge";
 import { agentStatusDot, agentStatusDotDefault } from "../lib/status-colors";
 import { MarkdownBody } from "../components/MarkdownBody";
@@ -25,8 +25,9 @@ import { CopyText } from "../components/CopyText";
 import { EntityRow } from "../components/EntityRow";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { ScrollToBottom } from "../components/ScrollToBottom";
-import { formatCents, formatDate, relativeTime, formatTokens } from "../lib/utils";
+import { formatCents, formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { cn } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Tabs } from "@/components/ui/tabs";
@@ -58,7 +59,17 @@ import {
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
-import { isUuidLike, type Agent, type HeartbeatRun, type HeartbeatRunEvent, type AgentRuntimeState, type LiveEvent } from "@paperclipai/shared";
+import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
+import {
+  isUuidLike,
+  type Agent,
+  type BudgetPolicySummary,
+  type HeartbeatRun,
+  type HeartbeatRunEvent,
+  type AgentRuntimeState,
+  type LiveEvent,
+} from "@paperclipai/shared";
+import { redactHomePathUserSegments, redactHomePathUserSegmentsInValue } from "@paperclipai/adapter-utils";
 import { agentRouteRef } from "../lib/utils";
 
 const runStatusIcons: Record<string, { icon: typeof CheckCircle2; color: string }> = {
@@ -92,11 +103,11 @@ function redactEnvValue(key: string, value: unknown): string {
   }
   if (shouldRedactSecretValue(key, value)) return REDACTED_ENV_VALUE;
   if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return redactHomePathUserSegments(value);
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(redactHomePathUserSegmentsInValue(value));
   } catch {
-    return String(value);
+    return redactHomePathUserSegments(String(value));
   }
 }
 
@@ -174,10 +185,11 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "configuration" | "runs";
+type AgentDetailView = "dashboard" | "configuration" | "runs" | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "configure" || value === "configuration") return "configuration";
+  if (value === "budget") return "budget";
   if (value === "runs") return value;
   return "dashboard";
 }
@@ -203,8 +215,7 @@ function runMetrics(run: HeartbeatRun) {
     "cache_read_input_tokens",
   );
   const cost =
-    usageNumber(usage, "costUsd", "cost_usd", "total_cost_usd") ||
-    usageNumber(result, "total_cost_usd", "cost_usd", "costUsd");
+    visibleRunCostUsd(usage, result);
   return {
     input,
     output,
@@ -293,11 +304,50 @@ export function AgentDetail() {
     enabled: !!resolvedCompanyId,
   });
 
+  const { data: budgetOverview } = useQuery({
+    queryKey: queryKeys.budgets.overview(resolvedCompanyId ?? "__none__"),
+    queryFn: () => budgetsApi.overview(resolvedCompanyId!),
+    enabled: !!resolvedCompanyId,
+    refetchInterval: 30_000,
+    staleTime: 5_000,
+  });
+
   const assignedIssues = (allIssues ?? [])
     .filter((i) => i.assigneeAgentId === agent?.id)
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   const reportsToAgent = (allAgents ?? []).find((a) => a.id === agent?.reportsTo);
   const directReports = (allAgents ?? []).filter((a) => a.reportsTo === agent?.id && a.status !== "terminated");
+  const agentBudgetSummary = useMemo(() => {
+    const matched = budgetOverview?.policies.find(
+      (policy) => policy.scopeType === "agent" && policy.scopeId === (agent?.id ?? routeAgentRef),
+    );
+    if (matched) return matched;
+    const budgetMonthlyCents = agent?.budgetMonthlyCents ?? 0;
+    const spentMonthlyCents = agent?.spentMonthlyCents ?? 0;
+    return {
+      policyId: "",
+      companyId: resolvedCompanyId ?? "",
+      scopeType: "agent",
+      scopeId: agent?.id ?? routeAgentRef,
+      scopeName: agent?.name ?? "Agent",
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: budgetMonthlyCents,
+      observedAmount: spentMonthlyCents,
+      remainingAmount: Math.max(0, budgetMonthlyCents - spentMonthlyCents),
+      utilizationPercent:
+        budgetMonthlyCents > 0 ? Number(((spentMonthlyCents / budgetMonthlyCents) * 100).toFixed(2)) : 0,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: budgetMonthlyCents > 0,
+      status: budgetMonthlyCents > 0 && spentMonthlyCents >= budgetMonthlyCents ? "hard_stop" : "ok",
+      paused: agent?.status === "paused",
+      pauseReason: agent?.pauseReason ?? null,
+      windowStart: new Date(),
+      windowEnd: new Date(),
+    } satisfies BudgetPolicySummary;
+  }, [agent, budgetOverview?.policies, resolvedCompanyId, routeAgentRef]);
   const mobileLiveRun = useMemo(
     () => (heartbeats ?? []).find((r) => r.status === "running" || r.status === "queued") ?? null,
     [heartbeats],
@@ -316,7 +366,9 @@ export function AgentDetail() {
         ? "configuration"
         : activeView === "runs"
           ? "runs"
-          : "dashboard";
+          : activeView === "budget"
+            ? "budget"
+            : "dashboard";
     if (routeAgentRef !== canonicalAgentRef || urlTab !== canonicalTab) {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
@@ -356,6 +408,24 @@ export function AgentDetail() {
     },
     onError: (err) => {
       setActionError(err instanceof Error ? err.message : "Action failed");
+    },
+  });
+
+  const budgetMutation = useMutation({
+    mutationFn: (amount: number) =>
+      budgetsApi.upsertPolicy(resolvedCompanyId!, {
+        scopeType: "agent",
+        scopeId: agent?.id ?? routeAgentRef,
+        amount,
+        windowKind: "calendar_month_utc",
+      }),
+    onSuccess: () => {
+      if (!resolvedCompanyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.budgets.overview(resolvedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(resolvedCompanyId) });
     },
   });
 
@@ -415,6 +485,8 @@ export function AgentDetail() {
         crumbs.push({ label: "Configuration" });
       } else if (activeView === "runs") {
         crumbs.push({ label: "Runs" });
+      } else if (activeView === "budget") {
+        crumbs.push({ label: "Budget" });
       } else {
         crumbs.push({ label: "Dashboard" });
       }
@@ -571,6 +643,7 @@ export function AgentDetail() {
               { value: "dashboard", label: "Dashboard" },
               { value: "configuration", label: "Configuration" },
               { value: "runs", label: "Runs" },
+              { value: "budget", label: "Budget" },
             ]}
             value={activeView}
             onValueChange={(value) => navigate(`/agents/${canonicalAgentRef}/${value}`)}
@@ -676,6 +749,17 @@ export function AgentDetail() {
           adapterType={agent.adapterType}
         />
       )}
+
+      {activeView === "budget" && resolvedCompanyId ? (
+        <div className="max-w-3xl">
+          <BudgetPolicyCard
+            summary={agentBudgetSummary}
+            isSaving={budgetMutation.isPending}
+            onSave={(amount) => budgetMutation.mutate(amount)}
+            variant="plain"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -848,8 +932,8 @@ function CostsSection({
 }) {
   const runsWithCost = runs
     .filter((r) => {
-      const u = r.usageJson as Record<string, unknown> | null;
-      return u && (u.cost_usd || u.total_cost_usd || u.input_tokens);
+      const metrics = runMetrics(r);
+      return metrics.cost > 0 || metrics.input > 0 || metrics.output > 0 || metrics.cached > 0;
     })
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -891,16 +975,16 @@ function CostsSection({
             </thead>
             <tbody>
               {runsWithCost.slice(0, 10).map((run) => {
-                const u = run.usageJson as Record<string, unknown>;
+                const metrics = runMetrics(run);
                 return (
                   <tr key={run.id} className="border-b border-border last:border-b-0">
                     <td className="px-3 py-2">{formatDate(run.createdAt)}</td>
                     <td className="px-3 py-2 font-mono">{run.id.slice(0, 8)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(Number(u.input_tokens ?? 0))}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(Number(u.output_tokens ?? 0))}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(metrics.input)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatTokens(metrics.output)}</td>
                     <td className="px-3 py-2 text-right tabular-nums">
-                      {(u.cost_usd || u.total_cost_usd)
-                        ? `$${Number(u.cost_usd ?? u.total_cost_usd ?? 0).toFixed(4)}`
+                      {metrics.cost > 0
+                        ? `$${metrics.cost.toFixed(4)}`
                         : "-"
                       }
                     </td>
@@ -1675,6 +1759,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
   const [logOffset, setLogOffset] = useState(0);
   const [isFollowing, setIsFollowing] = useState(false);
   const [isStreamingConnected, setIsStreamingConnected] = useState(false);
+  const [transcriptMode, setTranscriptMode] = useState<TranscriptMode>("nice");
   const logEndRef = useRef<HTMLDivElement>(null);
   const pendingLogLineRef = useRef("");
   const scrollContainerRef = useRef<ScrollContainer | null>(null);
@@ -2022,11 +2107,15 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
 
   const adapterInvokePayload = useMemo(() => {
     const evt = events.find((e) => e.eventType === "adapter.invoke");
-    return asRecord(evt?.payload ?? null);
+    return redactHomePathUserSegmentsInValue(asRecord(evt?.payload ?? null));
   }, [events]);
 
   const adapter = useMemo(() => getUIAdapter(adapterType), [adapterType]);
   const transcript = useMemo(() => buildTranscript(logLines, adapter.parseStdoutLine), [logLines, adapter]);
+
+  useEffect(() => {
+    setTranscriptMode("nice");
+  }, [run.id]);
 
   if (loading && logLoading) {
     return <p className="text-xs text-muted-foreground">Loading run logs...</p>;
@@ -2091,8 +2180,8 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
               <div className="text-xs text-muted-foreground mb-1">Prompt</div>
               <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap">
                 {typeof adapterInvokePayload.prompt === "string"
-                  ? adapterInvokePayload.prompt
-                  : JSON.stringify(adapterInvokePayload.prompt, null, 2)}
+                  ? redactHomePathUserSegments(adapterInvokePayload.prompt)
+                  : JSON.stringify(redactHomePathUserSegmentsInValue(adapterInvokePayload.prompt), null, 2)}
               </pre>
             </div>
           )}
@@ -2100,7 +2189,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
             <div>
               <div className="text-xs text-muted-foreground mb-1">Context</div>
               <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap">
-                {JSON.stringify(adapterInvokePayload.context, null, 2)}
+                {JSON.stringify(redactHomePathUserSegmentsInValue(adapterInvokePayload.context), null, 2)}
               </pre>
             </div>
           )}
@@ -2120,6 +2209,23 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           Transcript ({transcript.length})
         </span>
         <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-lg border border-border/70 bg-background/70 p-0.5">
+            {(["nice", "raw"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={cn(
+                  "rounded-md px-2.5 py-1 text-[11px] font-medium capitalize transition-colors",
+                  transcriptMode === mode
+                    ? "bg-accent text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => setTranscriptMode(mode)}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
           {isLive && !isFollowing && (
             <Button
               variant="ghost"
@@ -2146,123 +2252,18 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           )}
         </div>
       </div>
-      <div className="bg-neutral-100 dark:bg-neutral-950 rounded-lg p-3 font-mono text-xs space-y-0.5 overflow-x-hidden">
-        {transcript.length === 0 && !run.logRef && (
-          <div className="text-neutral-500">No persisted transcript for this run.</div>
+      <div className="max-h-[38rem] overflow-y-auto rounded-2xl border border-border/70 bg-background/40 p-3 sm:p-4">
+        <RunTranscriptView
+          entries={transcript}
+          mode={transcriptMode}
+          streaming={isLive}
+          emptyMessage={run.logRef ? "Waiting for transcript..." : "No persisted transcript for this run."}
+        />
+        {logError && (
+          <div className="mt-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-xs text-red-700 dark:text-red-300">
+            {logError}
+          </div>
         )}
-        {transcript.map((entry, idx) => {
-          const time = new Date(entry.ts).toLocaleTimeString("en-US", { hour12: false });
-          const grid = "grid grid-cols-[auto_auto_1fr] gap-x-2 sm:gap-x-3 items-baseline";
-          const tsCell = "text-neutral-400 dark:text-neutral-600 select-none w-12 sm:w-16 text-[10px] sm:text-xs";
-          const lblCell = "w-14 sm:w-20 text-[10px] sm:text-xs";
-          const contentCell = "min-w-0 whitespace-pre-wrap break-words overflow-hidden";
-          const expandCell = "col-span-full md:col-start-3 md:col-span-1";
-
-          if (entry.kind === "assistant") {
-            return (
-              <div key={`${entry.ts}-assistant-${idx}`} className={cn(grid, "py-0.5")}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, "text-green-700 dark:text-green-300")}>assistant</span>
-                <span className={cn(contentCell, "text-green-900 dark:text-green-100")}>{entry.text}</span>
-              </div>
-            );
-          }
-
-          if (entry.kind === "thinking") {
-            return (
-              <div key={`${entry.ts}-thinking-${idx}`} className={cn(grid, "py-0.5")}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, "text-green-600/60 dark:text-green-300/60")}>thinking</span>
-                <span className={cn(contentCell, "text-green-800/60 dark:text-green-100/60 italic")}>{entry.text}</span>
-              </div>
-            );
-          }
-
-          if (entry.kind === "user") {
-            return (
-              <div key={`${entry.ts}-user-${idx}`} className={cn(grid, "py-0.5")}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, "text-neutral-500 dark:text-neutral-400")}>user</span>
-                <span className={cn(contentCell, "text-neutral-700 dark:text-neutral-300")}>{entry.text}</span>
-              </div>
-            );
-          }
-
-          if (entry.kind === "tool_call") {
-            return (
-              <div key={`${entry.ts}-tool-${idx}`} className={cn(grid, "gap-y-1 py-0.5")}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, "text-yellow-700 dark:text-yellow-300")}>tool_call</span>
-                <span className="text-yellow-900 dark:text-yellow-100 min-w-0">{entry.name}</span>
-                <pre className={cn(expandCell, "bg-neutral-200 dark:bg-neutral-900 rounded p-2 text-[11px] overflow-x-auto whitespace-pre-wrap text-neutral-800 dark:text-neutral-200")}>
-                  {JSON.stringify(entry.input, null, 2)}
-                </pre>
-              </div>
-            );
-          }
-
-          if (entry.kind === "tool_result") {
-            return (
-              <div key={`${entry.ts}-toolres-${idx}`} className={cn(grid, "gap-y-1 py-0.5")}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, entry.isError ? "text-red-600 dark:text-red-300" : "text-purple-600 dark:text-purple-300")}>tool_result</span>
-                {entry.isError ? <span className="text-red-600 dark:text-red-400 min-w-0">error</span> : <span />}
-                <pre className={cn(expandCell, "bg-neutral-100 dark:bg-neutral-900 rounded p-2 text-[11px] overflow-x-auto whitespace-pre-wrap text-neutral-700 dark:text-neutral-300 max-h-60 overflow-y-auto")}>
-                  {(() => { try { return JSON.stringify(JSON.parse(entry.content), null, 2); } catch { return entry.content; } })()}
-                </pre>
-              </div>
-            );
-          }
-
-          if (entry.kind === "init") {
-            return (
-              <div key={`${entry.ts}-init-${idx}`} className={grid}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, "text-blue-700 dark:text-blue-300")}>init</span>
-                <span className={cn(contentCell, "text-blue-900 dark:text-blue-100")}>model: {entry.model}{entry.sessionId ? `, session: ${entry.sessionId}` : ""}</span>
-              </div>
-            );
-          }
-
-          if (entry.kind === "result") {
-            return (
-              <div key={`${entry.ts}-result-${idx}`} className={cn(grid, "gap-y-1 py-0.5")}>
-                <span className={tsCell}>{time}</span>
-                <span className={cn(lblCell, "text-cyan-700 dark:text-cyan-300")}>result</span>
-                <span className={cn(contentCell, "text-cyan-900 dark:text-cyan-100")}>
-                  tokens in={formatTokens(entry.inputTokens)} out={formatTokens(entry.outputTokens)} cached={formatTokens(entry.cachedTokens)} cost=${entry.costUsd.toFixed(6)}
-                </span>
-                {(entry.subtype || entry.isError || entry.errors.length > 0) && (
-                  <div className={cn(expandCell, "text-red-600 dark:text-red-300 whitespace-pre-wrap break-words")}>
-                    subtype={entry.subtype || "unknown"} is_error={entry.isError ? "true" : "false"}
-                    {entry.errors.length > 0 ? ` errors=${entry.errors.join(" | ")}` : ""}
-                  </div>
-                )}
-                {entry.text && (
-                  <div className={cn(expandCell, "whitespace-pre-wrap break-words text-neutral-800 dark:text-neutral-100")}>{entry.text}</div>
-                )}
-              </div>
-            );
-          }
-
-          const rawText = entry.text;
-          const label =
-            entry.kind === "stderr" ? "stderr" :
-            entry.kind === "system" ? "system" :
-            "stdout";
-          const color =
-            entry.kind === "stderr" ? "text-red-600 dark:text-red-300" :
-            entry.kind === "system" ? "text-blue-600 dark:text-blue-300" :
-            "text-neutral-500";
-          return (
-            <div key={`${entry.ts}-raw-${idx}`} className={grid}>
-              <span className={tsCell}>{time}</span>
-              <span className={cn(lblCell, color)}>{label}</span>
-              <span className={cn(contentCell, color)}>{rawText}</span>
-            </div>
-          )
-        })}
-        {logError && <div className="text-red-600 dark:text-red-300">{logError}</div>}
         <div ref={logEndRef} />
       </div>
 
@@ -2272,14 +2273,14 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
           {run.error && (
             <div className="text-xs text-red-600 dark:text-red-200">
               <span className="text-red-700 dark:text-red-300">Error: </span>
-              {run.error}
+              {redactHomePathUserSegments(run.error)}
             </div>
           )}
           {run.stderrExcerpt && run.stderrExcerpt.trim() && (
             <div>
               <div className="text-xs text-red-700 dark:text-red-300 mb-1">stderr excerpt</div>
               <pre className="bg-red-50 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap text-red-800 dark:text-red-100">
-                {run.stderrExcerpt}
+                {redactHomePathUserSegments(run.stderrExcerpt)}
               </pre>
             </div>
           )}
@@ -2287,7 +2288,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
             <div>
               <div className="text-xs text-red-700 dark:text-red-300 mb-1">adapter result JSON</div>
               <pre className="bg-red-50 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap text-red-800 dark:text-red-100">
-                {JSON.stringify(run.resultJson, null, 2)}
+                {JSON.stringify(redactHomePathUserSegmentsInValue(run.resultJson), null, 2)}
               </pre>
             </div>
           )}
@@ -2295,7 +2296,7 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
             <div>
               <div className="text-xs text-red-700 dark:text-red-300 mb-1">stdout excerpt</div>
               <pre className="bg-red-50 dark:bg-neutral-950 rounded-md p-2 text-xs overflow-x-auto whitespace-pre-wrap text-red-800 dark:text-red-100">
-                {run.stdoutExcerpt}
+                {redactHomePathUserSegments(run.stdoutExcerpt)}
               </pre>
             </div>
           )}
@@ -2321,7 +2322,11 @@ function LogViewer({ run, adapterType }: { run: HeartbeatRun; adapterType: strin
                     {evt.stream ? `[${evt.stream}]` : ""}
                   </span>
                   <span className={cn("break-all", color)}>
-                    {evt.message ?? (evt.payload ? JSON.stringify(evt.payload) : "")}
+                    {evt.message
+                      ? redactHomePathUserSegments(evt.message)
+                      : evt.payload
+                        ? JSON.stringify(redactHomePathUserSegmentsInValue(evt.payload))
+                        : ""}
                   </span>
                 </div>
               );
