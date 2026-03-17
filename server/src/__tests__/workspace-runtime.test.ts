@@ -4,12 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { vi } from "vitest";
 import {
+  buildSafeDirectoryEnv,
   cleanupExecutionWorkspaceArtifacts,
   ensureRuntimeServicesForRun,
   normalizeAdapterManagedRuntimeServices,
   realizeExecutionWorkspace,
   releaseRuntimeServicesForRun,
+  resolveShell,
   stopRuntimeServicesForExecutionWorkspace,
   type RealizedExecutionWorkspace,
 } from "../services/workspace-runtime.ts";
@@ -872,6 +875,131 @@ describe("ensureRuntimeServicesForRun", () => {
 
     await releaseRuntimeServicesForRun(runId);
     leasedRunIds.delete(runId);
+  });
+});
+
+describe("resolveShell (shell fallback)", () => {
+  const originalShell = process.env.SHELL;
+  const originalPlatform = process.platform;
+
+  afterEach(() => {
+    if (originalShell !== undefined) {
+      process.env.SHELL = originalShell;
+    } else {
+      delete process.env.SHELL;
+    }
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+  });
+
+  it("returns process.env.SHELL when set", () => {
+    process.env.SHELL = "/usr/bin/zsh";
+    expect(resolveShell()).toBe("/usr/bin/zsh");
+  });
+
+  it("trims whitespace from SHELL env var", () => {
+    process.env.SHELL = "  /usr/bin/fish  ";
+    expect(resolveShell()).toBe("/usr/bin/fish");
+  });
+
+  it("falls back to /bin/sh on non-Windows when SHELL is unset", () => {
+    delete process.env.SHELL;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    expect(resolveShell()).toBe("/bin/sh");
+  });
+
+  it("falls back to sh (bare) on Windows when SHELL is unset", () => {
+    delete process.env.SHELL;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    expect(resolveShell()).toBe("sh");
+  });
+
+  it("falls back to /bin/sh on darwin when SHELL is unset", () => {
+    delete process.env.SHELL;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    expect(resolveShell()).toBe("/bin/sh");
+  });
+
+  it("treats empty SHELL as unset and uses platform fallback", () => {
+    process.env.SHELL = "";
+    Object.defineProperty(process, "platform", { value: "linux" });
+    expect(resolveShell()).toBe("/bin/sh");
+  });
+
+  it("treats whitespace-only SHELL as unset and uses platform fallback", () => {
+    process.env.SHELL = "   ";
+    Object.defineProperty(process, "platform", { value: "win32" });
+    expect(resolveShell()).toBe("sh");
+  });
+});
+
+describe("buildSafeDirectoryEnv (safe.directory injection)", () => {
+  const originalGitConfigCount = process.env.GIT_CONFIG_COUNT;
+  const originalGitConfigKey0 = process.env.GIT_CONFIG_KEY_0;
+  const originalGitConfigValue0 = process.env.GIT_CONFIG_VALUE_0;
+
+  afterEach(() => {
+    // Restore original env
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("GIT_CONFIG_")) {
+        delete process.env[key];
+      }
+    }
+    if (originalGitConfigCount !== undefined) process.env.GIT_CONFIG_COUNT = originalGitConfigCount;
+    if (originalGitConfigKey0 !== undefined) process.env.GIT_CONFIG_KEY_0 = originalGitConfigKey0;
+    if (originalGitConfigValue0 !== undefined) process.env.GIT_CONFIG_VALUE_0 = originalGitConfigValue0;
+  });
+
+  it("sets GIT_CONFIG_COUNT, KEY, and VALUE for safe.directory when no prior config exists", () => {
+    delete process.env.GIT_CONFIG_COUNT;
+    const env = buildSafeDirectoryEnv("/tmp/my-repo");
+    expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(env.GIT_CONFIG_VALUE_0).toBe("/tmp/my-repo");
+  });
+
+  it("increments existing GIT_CONFIG_COUNT and uses the next index", () => {
+    process.env.GIT_CONFIG_COUNT = "2";
+    process.env.GIT_CONFIG_KEY_0 = "core.autocrlf";
+    process.env.GIT_CONFIG_VALUE_0 = "false";
+    process.env.GIT_CONFIG_KEY_1 = "user.email";
+    process.env.GIT_CONFIG_VALUE_1 = "test@example.com";
+
+    const env = buildSafeDirectoryEnv("/workspace/project");
+    expect(env.GIT_CONFIG_COUNT).toBe("3");
+    expect(env.GIT_CONFIG_KEY_2).toBe("safe.directory");
+    expect(env.GIT_CONFIG_VALUE_2).toBe("/workspace/project");
+    // Preserves existing entries
+    expect(env.GIT_CONFIG_KEY_0).toBe("core.autocrlf");
+    expect(env.GIT_CONFIG_VALUE_0).toBe("false");
+  });
+
+  it("guards against non-numeric GIT_CONFIG_COUNT by treating it as 0", () => {
+    process.env.GIT_CONFIG_COUNT = "not-a-number";
+    const env = buildSafeDirectoryEnv("/repo");
+    expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(env.GIT_CONFIG_VALUE_0).toBe("/repo");
+  });
+
+  it("guards against negative GIT_CONFIG_COUNT by clamping to 0", () => {
+    process.env.GIT_CONFIG_COUNT = "-5";
+    const env = buildSafeDirectoryEnv("/repo");
+    expect(env.GIT_CONFIG_COUNT).toBe("1");
+    expect(env.GIT_CONFIG_KEY_0).toBe("safe.directory");
+    expect(env.GIT_CONFIG_VALUE_0).toBe("/repo");
+  });
+
+  it("scopes safe.directory to the specific cwd, not a wildcard", () => {
+    delete process.env.GIT_CONFIG_COUNT;
+    const env = buildSafeDirectoryEnv("/specific/path");
+    expect(env.GIT_CONFIG_VALUE_0).toBe("/specific/path");
+    expect(env.GIT_CONFIG_VALUE_0).not.toBe("*");
+  });
+
+  it("does not mutate process.env", () => {
+    delete process.env.GIT_CONFIG_COUNT;
+    buildSafeDirectoryEnv("/tmp/test");
+    expect(process.env.GIT_CONFIG_COUNT).toBeUndefined();
   });
 });
 
