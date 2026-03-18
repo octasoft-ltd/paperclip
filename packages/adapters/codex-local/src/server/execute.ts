@@ -117,7 +117,7 @@ export async function ensureCodexSkillsInjected(
   );
   for (const skillName of removedSkills) {
     await onLog(
-      "stderr",
+      "stdout",
       `[paperclip] Removed maintainer-only Codex skill "${skillName}" from ${skillsHome}\n`,
     );
   }
@@ -144,7 +144,7 @@ export async function ensureCodexSkillsInjected(
             await symlinkOrJunction(entry.source, target);
           }
           await onLog(
-            "stderr",
+            "stdout",
             `[paperclip] Repaired Codex skill "${entry.name}" into ${skillsHome}\n`,
           );
           continue;
@@ -155,7 +155,7 @@ export async function ensureCodexSkillsInjected(
       if (result === "skipped") continue;
 
       await onLog(
-        "stderr",
+        "stdout",
         `[paperclip] ${result === "repaired" ? "Repaired" : "Injected"} Codex skill "${entry.name}" into ${skillsHome}\n`,
       );
     } catch (err) {
@@ -365,7 +365,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `Resolve any relative file references from ${instructionsDir}.\n\n`;
       instructionsChars = instructionsPrefix.length;
       await onLog(
-        "stderr",
+        "stdout",
         `[paperclip] Loaded agent instructions file: ${instructionsFilePath}\n`,
       );
     } catch (err) {
