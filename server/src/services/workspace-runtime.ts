@@ -437,7 +437,7 @@ async function recordWorkspaceCommandOperation(
     cwd: input.cwd,
     metadata: input.metadata ?? null,
     run: async () => {
-      const shell = process.env.SHELL?.trim() || "/bin/sh";
+      const shell = process.env.SHELL?.trim() || getDefaultShell();
       const result = await executeProcess({
         command: shell,
         args: ["-c", input.command],
