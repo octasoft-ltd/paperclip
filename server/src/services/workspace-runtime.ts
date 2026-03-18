@@ -390,6 +390,7 @@ async function recordGitOperation(
         command: "git",
         args: input.args,
         cwd: input.cwd,
+        env: buildSafeDirectoryEnv(input.cwd) as NodeJS.ProcessEnv,
       });
       stdout = result.stdout;
       stderr = result.stderr;
