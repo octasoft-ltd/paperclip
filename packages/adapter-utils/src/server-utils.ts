@@ -336,6 +336,10 @@ export async function readPaperclipSkillMarkdown(
  * is silently ignored on non-Windows platforms.
  */
 export async function symlinkOrJunction(source: string, target: string): Promise<void> {
+  if (process.platform !== "win32") {
+    await fs.symlink(source, target);
+    return;
+  }
   try {
     await fs.symlink(source, target);
   } catch (err: unknown) {
