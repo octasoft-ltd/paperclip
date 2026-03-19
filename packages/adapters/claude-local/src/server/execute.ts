@@ -15,6 +15,7 @@ import {
   readPaperclipRuntimeSkillEntries,
   joinPromptSections,
   buildInvocationEnvForLogs,
+  buildWakeContextNote,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePathInEnv,
@@ -420,10 +421,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const shouldUseResumeDeltaPrompt = Boolean(sessionId) && wakePrompt.length > 0;
   const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(promptTemplate, templateData);
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const wakeContextNote = buildWakeContextNote(context);
   const prompt = joinPromptSections([
     renderedBootstrapPrompt,
     wakePrompt,
     sessionHandoffNote,
+    wakeContextNote,
     renderedPrompt,
   ]);
   const promptMetrics = {
