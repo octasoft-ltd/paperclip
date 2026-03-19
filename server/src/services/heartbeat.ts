@@ -2531,6 +2531,7 @@ export function heartbeatService(db: Db) {
         const {
           contextSnapshot: promotedContextSnapshot,
           taskKey: promotedTaskKey,
+          wakeCommentId: promotedWakeCommentId,
         } = enrichWakeContextSnapshot({
           contextSnapshot: promotedContextSeed,
           reason: promotedReason,
@@ -2538,6 +2539,14 @@ export function heartbeatService(db: Db) {
           triggerDetail: promotedTriggerDetail,
           payload: promotedPayload,
         });
+
+        // Embed wake comment body for promoted runs too (OCT-238).
+        if (promotedWakeCommentId && !readNonEmptyString(promotedContextSnapshot.wakeCommentBody)) {
+          const comment = await issuesSvc.getComment(promotedWakeCommentId);
+          if (comment?.body) {
+            promotedContextSnapshot.wakeCommentBody = comment.body;
+          }
+        }
 
         const sessionBefore = await resolveSessionBeforeForWakeup(deferredAgent, promotedTaskKey);
         const now = new Date();
@@ -2618,6 +2627,17 @@ export function heartbeatService(db: Db) {
       triggerDetail,
       payload,
     });
+
+    // Fetch and embed the wake comment body so the agent prompt includes the
+    // actual comment text, not just the ID.  This prevents agents from ignoring
+    // wake context when resuming a stale session (OCT-238).
+    if (wakeCommentId && !readNonEmptyString(enrichedContextSnapshot.wakeCommentBody)) {
+      const comment = await issuesSvc.getComment(wakeCommentId);
+      if (comment?.body) {
+        enrichedContextSnapshot.wakeCommentBody = comment.body;
+      }
+    }
+
     const issueId = readNonEmptyString(enrichedContextSnapshot.issueId) ?? issueIdFromPayload;
 
     const agent = await getAgent(agentId);
