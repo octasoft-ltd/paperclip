@@ -193,6 +193,49 @@ export function joinPromptSections(
     .join(separator);
 }
 
+/**
+ * Build a short markdown note that surfaces wake context (comment ID, reason)
+ * directly in the prompt so the agent doesn't have to discover it via env vars.
+ * Returns an empty string when there is no actionable wake context.
+ */
+export function buildWakeContextNote(context: Record<string, unknown>): string {
+  const wakeCommentId =
+    (typeof context.wakeCommentId === "string" && context.wakeCommentId.trim()) ||
+    (typeof context.commentId === "string" && context.commentId.trim()) ||
+    null;
+  const wakeCommentBody =
+    typeof context.wakeCommentBody === "string" && context.wakeCommentBody.trim().length > 0
+      ? context.wakeCommentBody.trim()
+      : null;
+  const wakeReason =
+    typeof context.wakeReason === "string" && context.wakeReason.trim().length > 0
+      ? context.wakeReason.trim()
+      : null;
+  const taskId =
+    (typeof context.taskId === "string" && context.taskId.trim()) ||
+    (typeof context.issueId === "string" && context.issueId.trim()) ||
+    null;
+  const approvalId =
+    typeof context.approvalId === "string" && context.approvalId.trim().length > 0
+      ? context.approvalId.trim()
+      : null;
+
+  if (!wakeCommentId && !approvalId) return "";
+
+  const lines: string[] = [];
+  if (wakeReason) lines.push(`Wake reason: ${wakeReason}`);
+  if (taskId) lines.push(`Task ID: ${taskId}`);
+  if (wakeCommentId) lines.push(`Triggered by comment: ${wakeCommentId}`);
+  if (wakeCommentBody) {
+    lines.push("");
+    lines.push("Comment body:");
+    lines.push(wakeCommentBody);
+  }
+  if (approvalId) lines.push(`Approval ID: ${approvalId}`);
+
+  return lines.join("\n");
+}
+
 export function redactEnvForLogs(env: Record<string, string>): Record<string, string> {
   const redacted: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {

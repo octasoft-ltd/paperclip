@@ -11,6 +11,7 @@ import {
   buildPaperclipEnv,
   joinPromptSections,
   buildInvocationEnvForLogs,
+  buildWakeContextNote,
   ensureAbsoluteDirectory,
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
@@ -304,9 +305,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const wakeContextNote = buildWakeContextNote(context);
   const userPrompt = joinPromptSections([
     renderedBootstrapPrompt,
     sessionHandoffNote,
+    wakeContextNote,
     renderedHeartbeatPrompt,
   ]);
   const promptMetrics = {
