@@ -15,7 +15,6 @@ import {
   ensureCommandResolvable,
   ensurePaperclipSkillSymlink,
   ensurePathInEnv,
-  symlinkOrJunction,
   renderTemplate,
   runChildProcess,
   readPaperclipRuntimeSkillEntries,
