@@ -44,6 +44,7 @@ import { logger } from "../middleware/logger.js";
 import { forbidden, HttpError, unauthorized } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
+import { statusBecameActionable } from "./issues-status-actionable.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 
@@ -1239,6 +1240,15 @@ export function issueRoutes(
       issue.status !== "backlog" &&
       req.body.status !== undefined;
 
+    // Wake agent when status transitions to an actionable state from a
+    // non-actionable one (e.g. in_review → todo, done → todo).  The backlog
+    // case is already covered above, so we exclude it here.
+    const statusIsNowActionable = statusBecameActionable({
+      requestStatus: req.body.status,
+      previousStatus: existing.status,
+      newStatus: issue.status,
+    });
+
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
       const wakeups = new Map<string, Parameters<typeof heartbeat.wakeup>[1]>();
@@ -1263,7 +1273,7 @@ export function issueRoutes(
         });
       }
 
-      if (!assigneeChanged && statusChangedFromBacklog && issue.assigneeAgentId) {
+      if (!assigneeChanged && (statusChangedFromBacklog || statusIsNowActionable) && issue.assigneeAgentId) {
         wakeups.set(issue.assigneeAgentId, {
           source: "automation",
           triggerDetail: "system",
