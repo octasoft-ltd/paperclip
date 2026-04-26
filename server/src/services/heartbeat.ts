@@ -2811,6 +2811,14 @@ export function heartbeatService(db: Db) {
       if (!finalizedRun) finalizedRun = await getRun(run.id);
       if (!finalizedRun) continue;
 
+      // Clear stale task sessions on process loss (OCT-178)
+      const taskKey = deriveTaskKey(finalizedRun.contextSnapshot as Record<string, unknown> | null, null);
+      if (taskKey) {
+        await clearTaskSessions(finalizedRun.companyId, finalizedRun.agentId, {
+          taskKey,
+        });
+      }
+
       let retriedRun: typeof heartbeatRuns.$inferSelect | null = null;
       if (shouldRetry) {
         const agent = await getAgent(run.agentId);
@@ -4079,7 +4087,12 @@ export function heartbeatService(db: Db) {
           legacySessionId: nextSessionState.legacySessionId,
         }, normalizedUsage);
         if (taskKey) {
-          if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
+          const clearTaskSession =
+            outcome === "failed" ||
+            outcome === "timed_out" ||
+            adapterResult.clearSession ||
+            (!nextSessionState.params && !nextSessionState.displayId);
+          if (clearTaskSession) {
             await clearTaskSessions(agent.companyId, agent.id, {
               taskKey,
               adapterType: agent.adapterType,
@@ -4140,25 +4153,21 @@ export function heartbeatService(db: Db) {
         await finalizeIssueCommentPolicy(failedRun, agent);
         await releaseIssueExecutionAndPromote(failedRun);
 
+        // Clear the session so the next heartbeat starts fresh instead of
+        // resuming a potentially stale/corrupt session from this failed run.
         await updateRuntimeState(agent, failedRun, {
           exitCode: null,
           signal: null,
           timedOut: false,
           errorMessage: message,
         }, {
-          legacySessionId: runtimeForAdapter.sessionId,
+          legacySessionId: null,
         });
 
-        if (taskKey && (previousSessionParams || previousSessionDisplayId || taskSession)) {
-          await upsertTaskSession({
-            companyId: agent.companyId,
-            agentId: agent.id,
-            adapterType: agent.adapterType,
+        if (taskKey) {
+          await clearTaskSessions(agent.companyId, agent.id, {
             taskKey,
-            sessionParamsJson: previousSessionParams,
-            sessionDisplayId: previousSessionDisplayId,
-            lastRunId: failedRun.id,
-            lastError: message,
+            adapterType: agent.adapterType,
           });
         }
       }
