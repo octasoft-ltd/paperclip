@@ -2984,3 +2984,83 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
     expect(row).toEqual({ executionRunId: null, executionLockedAt: null });
   });
 });
+
+// Regression for OCT-991 / upstream regression introduced by paperclipai/paperclip#5780.
+// enrichCommentsWithDerivedAgentAttribution bound raw `Date` objects into a
+// postgres-js prepared statement (heartbeat_runs time-window predicate), which
+// threw `TypeError [ERR_INVALID_ARG_TYPE] ... Received an instance of Date`
+// inside Buffer.byteLength and surfaced as a 500 on GET /api/issues/:id/comments
+// whenever the issue had a user-authored comment with no createdByRunId.
+describeEmbeddedPostgres("issueService.listComments — Date bind regression (OCT-991)", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-listcomments-date-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+    await ensureIssueRelationsTable(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(issues);
+    await db.delete(agents);
+    await db.delete(instanceSettings);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("does not throw when a user-authored comment with no createdByRunId is in the result set", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const userCommentId = randomUUID();
+    const commentCreatedAt = new Date("2026-05-14T09:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Issue with a user comment that has no run id",
+      status: "in_progress",
+      priority: "medium",
+    });
+
+    await db.insert(issueComments).values({
+      id: userCommentId,
+      companyId,
+      issueId,
+      authorAgentId: null,
+      authorUserId: "user-1",
+      authorType: "user",
+      createdByRunId: null,
+      body: "user-authored comment with no run id",
+      createdAt: commentCreatedAt,
+      updatedAt: commentCreatedAt,
+    });
+
+    // Before the fix this rejected with `DrizzleQueryError` wrapping
+    // `TypeError [ERR_INVALID_ARG_TYPE]: The "string" argument must be of type
+    // string or an instance of Buffer or ArrayBuffer. Received an instance of Date`
+    // because the enrichment query bound `new Date(...)` values into the
+    // heartbeat_runs `coalesce(...) >= $5 / <= $6` predicates.
+    const comments = await svc.listComments(issueId, { order: "asc" });
+
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.id).toBe(userCommentId);
+    expect(comments[0]?.authorUserId).toBe("user-1");
+    expect(comments[0]?.authorAgentId).toBeNull();
+  });
+});
