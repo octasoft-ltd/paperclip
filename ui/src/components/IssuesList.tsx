@@ -575,6 +575,22 @@ export function IssuesList({
     enabled: !!selectedCompanyId && normalizedIssueSearch.length > 0 && !searchWithinLoadedIssues,
     placeholderData: (previousData) => previousData,
   });
+  // Board column queries pull `ISSUE_BOARD_COLUMN_RESULT_LIMIT` issues per
+  // status. The server's default sort is priority-first (critical → high
+  // → medium → low, then date within each priority bucket). In busy
+  // projects with >limit issues in a column (typically `done`), that
+  // ordering truncates low-priority items from the response even when
+  // they are the most recently completed work — they never reach the
+  // browser, so the user only sees a stale-looking column dominated by
+  // old high-priority items.
+  //
+  // To keep the kanban honest about recency, ask the server to sort each
+  // column by `updated` (descending by default) so the most recent items
+  // are always within the fetch window. The user's chosen `sortDir` is
+  // honored. The client-side sort (`sortIssues` via `viewState.sortField`)
+  // still applies to the fetched set, so per-column ordering inside the
+  // browser respects the user's preference.
+  const boardServerSortDir = viewState.sortDir;
   const boardIssueQueries = useQueries({
     queries: boardIssueStatuses.map((status) => ({
       queryKey: [
@@ -586,6 +602,7 @@ export function IssuesList({
         searchFilters ?? {},
         ISSUE_BOARD_COLUMN_RESULT_LIMIT,
         enableRoutineVisibilityFilter ? "with-routine-executions" : "without-routine-executions",
+        boardServerSortDir,
       ],
       queryFn: () =>
         issuesApi.list(selectedCompanyId!, {
@@ -594,6 +611,8 @@ export function IssuesList({
           projectId,
           status,
           limit: ISSUE_BOARD_COLUMN_RESULT_LIMIT,
+          sortField: "updated",
+          sortDir: boardServerSortDir,
           ...(enableRoutineVisibilityFilter ? { includeRoutineExecutions: true } : {}),
         }),
       enabled: !!selectedCompanyId && viewState.viewMode === "board" && !searchWithinLoadedIssues,
@@ -1200,9 +1219,16 @@ export function IssuesList({
         </p>
       )}
       {boardColumnLimitReached && (
-        <p className="text-xs text-muted-foreground">
-          Some board columns are showing up to {ISSUE_BOARD_COLUMN_RESULT_LIMIT} issues. Refine filters or search to reveal the rest.
-        </p>
+        <div
+          className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+          role="status"
+        >
+          <span aria-hidden className="mt-0.5">⚠</span>
+          <span>
+            <strong>Some board columns are at the {ISSUE_BOARD_COLUMN_RESULT_LIMIT}-issue display limit</strong> — older items
+            in those columns are hidden from view. Refine filters, narrow by date, or switch to the list view to see the rest.
+          </span>
+        </div>
       )}
       {!isLoading && filtered.length === 0 && viewState.viewMode === "list" && (
         <EmptyState
