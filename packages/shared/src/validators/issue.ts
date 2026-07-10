@@ -27,6 +27,7 @@ import {
   MODEL_PROFILE_KEYS,
   REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT,
 } from "../constants.js";
+import { parseAgentRoutingReference } from "../agent-routing.js";
 import { multilineTextSchema } from "./text.js";
 import { lowTrustReviewPresetPolicySchema, trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -372,6 +373,15 @@ function withCreateIssueStatusDefault<T extends z.ZodRawShape>(schema: z.ZodObje
   }, schema);
 }
 
+const assigneeAgentCreateReferenceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine(
+    (value) => z.string().uuid().safeParse(value).success || parseAgentRoutingReference(value) !== null,
+    "assigneeAgentId must be an agent ID or a routing reference (role:<role> or capability:<capability>)",
+  );
+
 const createIssueBaseSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
@@ -384,7 +394,7 @@ const createIssueBaseSchema = z.object({
   status: z.enum(ISSUE_STATUSES),
   workMode: z.enum(ISSUE_WORK_MODES).optional().default("standard"),
   priority: z.enum(ISSUE_PRIORITIES).optional().default("medium"),
-  assigneeAgentId: z.string().uuid().optional().nullable(),
+  assigneeAgentId: assigneeAgentCreateReferenceSchema.optional().nullable(),
   assigneeUserId: z.string().optional().nullable(),
   requestDepth: issueRequestDepthInputSchema.optional().default(0),
   billingCode: z.string().optional().nullable(),

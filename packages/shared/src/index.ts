@@ -15,6 +15,14 @@ export {
   type AgentWorkEligibility,
 } from "./agent-eligibility.js";
 export {
+  AGENT_ROUTING_STRATEGIES,
+  agentCapabilitiesMatch,
+  formatAgentRoutingReference,
+  parseAgentRoutingReference,
+  type AgentRoutingReference,
+  type AgentRoutingStrategy,
+} from "./agent-routing.js";
+export {
   asBoolean,
   asString,
   asStringArray,
