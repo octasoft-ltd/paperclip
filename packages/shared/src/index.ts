@@ -15,6 +15,14 @@ export {
   type AgentWorkEligibility,
 } from "./agent-eligibility.js";
 export {
+  AGENT_ROUTING_STRATEGIES,
+  agentCapabilitiesMatch,
+  formatAgentRoutingReference,
+  parseAgentRoutingReference,
+  type AgentRoutingReference,
+  type AgentRoutingStrategy,
+} from "./agent-routing.js";
+export {
   asBoolean,
   asString,
   asStringArray,
@@ -52,6 +60,8 @@ export {
   AGENT_ADAPTER_TYPES,
   AGENT_ROLES,
   AGENT_ROLE_LABELS,
+  isAgentRole,
+  coerceAgentRole,
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   WORKSPACE_BRANCH_ROUTINE_VARIABLE,
   MODEL_PROFILE_KEYS,

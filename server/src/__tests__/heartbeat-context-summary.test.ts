@@ -72,6 +72,58 @@ describe("buildPaperclipTaskMarkdown", () => {
     expect(acceptedConfirmation).not.toContain("- Work mode: \"planning\"");
   });
 
+  it("adds a planner role directive for planner agents on standard-work issues", () => {
+    const assignment = buildPaperclipTaskMarkdown({
+      issue: {
+        id: "issue-3",
+        identifier: "PAP-500",
+        title: "Ship the feature",
+        workMode: "standard",
+        description: null,
+      },
+      agentRole: "planner",
+    });
+
+    expect(assignment).toContain("Planner role directive:");
+    expect(assignment).toContain("Never write code or perform implementation work yourself");
+    expect(assignment).not.toContain("- Work mode: \"planning\"");
+
+    const acceptedConfirmation = buildPaperclipTaskMarkdown({
+      issue: {
+        id: "issue-3",
+        identifier: "PAP-500",
+        title: "Ship the feature",
+        workMode: "standard",
+        description: null,
+      },
+      interaction: {
+        kind: "request_confirmation",
+        status: "accepted",
+      },
+      agentRole: "planner",
+    });
+
+    expect(acceptedConfirmation).toContain("Planner role directive:");
+    expect(acceptedConfirmation).toContain("Create child issues from the approved plan only");
+    expect(acceptedConfirmation).not.toContain("Never write code or perform implementation work yourself");
+  });
+
+  it("does not add planner directives for non-planner roles on standard-work issues", () => {
+    const assignment = buildPaperclipTaskMarkdown({
+      issue: {
+        id: "issue-3",
+        identifier: "PAP-500",
+        title: "Ship the feature",
+        workMode: "standard",
+        description: null,
+      },
+      agentRole: "engineer",
+    });
+
+    expect(assignment).not.toContain("Planner role directive:");
+    expect(assignment).not.toContain("Do not write code");
+  });
+
   it("prefers ordinary comment planning guidance over stale accepted confirmation state", () => {
     const commentWake = buildPaperclipTaskMarkdown({
       issue: {

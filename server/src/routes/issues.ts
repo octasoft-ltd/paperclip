@@ -53,6 +53,8 @@ import {
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   isUuidLike,
+  formatAgentRoutingReference,
+  parseAgentRoutingReference,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
   type CompanySearchQuery,
   type CompanySearchResponse,
@@ -2254,6 +2256,17 @@ export function issueRoutes(
     const raw = rawAssigneeAgentId.trim();
     if (raw.length === 0) {
       return rawAssigneeAgentId;
+    }
+
+    const routingReference = parseAgentRoutingReference(raw);
+    if (routingReference) {
+      const routed = await agentsSvc.resolveByRoutingReference(companyId, routingReference);
+      if (!routed.agent) {
+        throw notFound(
+          `No assignable agent matches routing reference "${formatAgentRoutingReference(routingReference)}"`,
+        );
+      }
+      return routed.agent.id;
     }
 
     const resolved = await agentsSvc.resolveByReference(companyId, raw);

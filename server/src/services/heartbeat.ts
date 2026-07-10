@@ -2774,6 +2774,7 @@ export function buildPaperclipTaskMarkdown(input: {
     status?: string | null;
   } | null;
   acceptedPlanContinuation?: boolean;
+  agentRole?: string | null;
 }) {
   const quoteTaskScalar = (value: string) => JSON.stringify(value);
   const fenceTaskText = (value: string) => {
@@ -2786,12 +2787,13 @@ export function buildPaperclipTaskMarkdown(input: {
   };
   const issue = input.issue;
   const wakeComment = input.wakeComment ?? null;
+  const plannerRole = input.agentRole === "planner";
   const acceptedPlanContinuation =
     !wakeComment &&
     (input.acceptedPlanContinuation || (
       input.interaction?.kind === "request_confirmation" &&
       input.interaction.status === "accepted" &&
-      issue?.workMode === "planning"
+      (issue?.workMode === "planning" || plannerRole)
     ));
   if (!issue && !wakeComment) return null;
 
@@ -2817,6 +2819,14 @@ export function buildPaperclipTaskMarkdown(input: {
         "",
         "Planning mode directive:",
         directive,
+      );
+    } else if (plannerRole) {
+      lines.push(
+        "",
+        "Planner role directive:",
+        acceptedPlanContinuation
+          ? "Create child issues from the approved plan only. Do not write code or perform implementation work on this issue."
+          : "You are a planner-role agent. Plan and delegate only: produce plans and create child issues for implementer agents. Never write code or perform implementation work yourself, regardless of this issue's work mode.",
       );
     } else if (acceptedPlanContinuation) {
       lines.push(
@@ -8090,6 +8100,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       acceptedPlanContinuation:
         readNonEmptyString(context.workspaceRefreshReason) === "accepted_plan_confirmation"
         && Object.keys(parseObject(context.acceptedPlanWakeRouting)).length === 0,
+      agentRole: agent.role,
     });
     if (issueRef) {
       context.paperclipIssue = {

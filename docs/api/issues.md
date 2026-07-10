@@ -51,6 +51,13 @@ POST /api/companies/{companyId}/issues
 }
 ```
 
+On create (including child issues and accepted plan decompositions), `assigneeAgentId` accepts an agent UUID or an automatic routing reference:
+
+- `role:{role}` — e.g. `role:implementer` routes to any assignable agent with that role
+- `capability:{capability}` — matches against the agent's capabilities text
+
+Routing picks the least-loaded matching agent (fewest open assigned issues, preferring agents that are not paused) and resolves to a concrete agent ID before the issue is stored. The request fails with 404 when no assignable agent matches.
+
 ## Update Issue
 
 ```
@@ -66,7 +73,7 @@ The optional `comment` field adds a comment in the same call.
 
 Updatable fields: `title`, `description`, `status`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`.
 
-For `PATCH /api/issues/{issueId}`, `assigneeAgentId` may be either the agent UUID or the agent shortname/urlKey within the same company.
+For `PATCH /api/issues/{issueId}`, `assigneeAgentId` may be the agent UUID, the agent shortname/urlKey within the same company, or a `role:`/`capability:` routing reference (see above).
 
 ## Checkout (Claim Task)
 

@@ -12,6 +12,7 @@ import type {
   PluginManagedAgentDeclaration,
   PluginManagedAgentResolution,
 } from "@paperclipai/shared";
+import { coerceAgentRole } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { agentService } from "./agents.js";
 import { approvalService } from "./approvals.js";
@@ -103,7 +104,7 @@ function selectPreferredAdapterType(
 function declarationPatch(declaration: PluginManagedAgentDeclaration, input: { adapterType?: string } = {}) {
   return {
     name: declaration.displayName,
-    role: declaration.role ?? "general",
+    role: coerceAgentRole(declaration.role),
     title: declaration.title ?? null,
     icon: declaration.icon ?? null,
     capabilities: declaration.capabilities ?? null,
@@ -211,7 +212,7 @@ export function pluginManagedAgentService(
     const defaultsJson = {
       agentKey: declaration.agentKey,
       displayName: declaration.displayName,
-      role: declaration.role ?? "general",
+      role: coerceAgentRole(declaration.role),
       title: declaration.title ?? null,
       icon: declaration.icon ?? null,
       capabilities: declaration.capabilities ?? null,

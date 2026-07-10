@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -18,10 +18,13 @@ import {
 } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  agentCapabilitiesMatch,
+  coerceAgentRole,
   getAgentWorkEligibility,
   isUuidLike,
   normalizeAgentUrlKey,
   type AgentEligibilityAgent,
+  type AgentRoutingReference,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
@@ -166,7 +169,7 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
 
   return {
     name: snapshot.name,
-    role: snapshot.role,
+    role: coerceAgentRole(snapshot.role),
     title: typeof snapshot.title === "string" || snapshot.title === null ? snapshot.title : null,
     reportsTo:
       typeof snapshot.reportsTo === "string" || snapshot.reportsTo === null ? snapshot.reportsTo : null,
@@ -821,6 +824,61 @@ export function agentService(db: Db) {
         return { agent: null, ambiguous: true } as const;
       }
       return { agent: null, ambiguous: false } as const;
+    },
+
+    resolveByRoutingReference: async (companyId: string, reference: AgentRoutingReference) => {
+      const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
+      const eligibilityAgents = rows.map(toEligibilityAgent);
+      const eligibilityById = new Map(
+        rows.map((row) => [
+          row.id,
+          getAgentWorkEligibility({ agent: toEligibilityAgent(row), agents: eligibilityAgents }),
+        ]),
+      );
+      const roleNeedle = reference.value.trim().toLowerCase();
+      const candidates = rows.filter((row) => {
+        if (!eligibilityById.get(row.id)?.assignable) return false;
+        return reference.strategy === "role"
+          ? row.role.trim().toLowerCase() === roleNeedle
+          : agentCapabilitiesMatch(row.capabilities, reference.value);
+      });
+      if (candidates.length === 0) {
+        return { agent: null, candidateCount: 0 } as const;
+      }
+
+      const loadRows = await db
+        .select({
+          agentId: issues.assigneeAgentId,
+          openCount: sql<number>`count(*)::double precision`,
+        })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, companyId),
+            inArray(issues.assigneeAgentId, candidates.map((row) => row.id)),
+            notInArray(issues.status, ["backlog", "done", "cancelled"]),
+          ),
+        )
+        .groupBy(issues.assigneeAgentId);
+      const loadByAgentId = new Map(loadRows.map((row) => [row.agentId, Number(row.openCount ?? 0)]));
+
+      const selected = [...candidates].sort((a, b) => {
+        const invokableA = eligibilityById.get(a.id)?.invokable ? 0 : 1;
+        const invokableB = eligibilityById.get(b.id)?.invokable ? 0 : 1;
+        if (invokableA !== invokableB) return invokableA - invokableB;
+        const loadA = loadByAgentId.get(a.id) ?? 0;
+        const loadB = loadByAgentId.get(b.id) ?? 0;
+        if (loadA !== loadB) return loadA - loadB;
+        const createdA = a.createdAt?.getTime() ?? 0;
+        const createdB = b.createdAt?.getTime() ?? 0;
+        if (createdA !== createdB) return createdA - createdB;
+        return a.id.localeCompare(b.id);
+      })[0]!;
+
+      return {
+        agent: normalizeAgentRow(selected, rows),
+        candidateCount: candidates.length,
+      } as const;
     },
   };
 }

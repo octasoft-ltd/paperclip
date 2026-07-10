@@ -227,6 +227,32 @@ describe("issue validators", () => {
     }).status).toBe("backlog");
   });
 
+  it("accepts routing references for assigneeAgentId on create and rejects other non-UUID values", () => {
+    expect(createIssueSchema.parse({
+      title: "Routed work",
+      assigneeAgentId: "role:implementer",
+    }).assigneeAgentId).toBe("role:implementer");
+    expect(createIssueSchema.parse({
+      title: "Routed work",
+      assigneeAgentId: "capability:code review",
+    }).assigneeAgentId).toBe("capability:code review");
+    expect(createIssueSchema.safeParse({
+      title: "Routed work",
+      assigneeAgentId: "some-shortname",
+    }).success).toBe(false);
+    expect(createIssueSchema.safeParse({
+      title: "Routed work",
+      assigneeAgentId: "role:",
+    }).success).toBe(false);
+  });
+
+  it("defaults omitted create status to todo for routing-reference assignees", () => {
+    expect(createIssueSchema.parse({
+      title: "Routed work",
+      assigneeAgentId: "role:implementer",
+    }).status).toBe("todo");
+  });
+
   it("defaults issue work mode to standard and accepts planning", () => {
     expect(createIssueSchema.parse({ title: "Plan first" }).workMode).toBe("standard");
     expect(createIssueSchema.parse({ title: "Plan first", workMode: "planning" }).workMode).toBe("planning");
