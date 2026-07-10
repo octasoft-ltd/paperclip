@@ -42,6 +42,7 @@ import {
   ROUTINE_STATUSES,
   ROUTINE_TRIGGER_KINDS,
   ROUTINE_TRIGGER_SIGNING_MODES,
+  coerceAgentRole,
   deriveProjectUrlKey,
   envConfigSchema,
   issueCommentAuthorTypeSchema,
@@ -3584,7 +3585,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         }
 
         const extension = stripEmptyValues({
-          role: agent.role !== "agent" ? agent.role : undefined,
+          role: (agent.role as string) !== "agent" ? agent.role : undefined,
           icon: agent.icon ?? null,
           capabilities: agent.capabilities ?? null,
           adapter: {
@@ -4556,9 +4557,13 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             desiredSkills,
             mode,
           );
+          const importedRole = coerceAgentRole(manifestAgent.role);
+          if (manifestAgent.role && importedRole !== manifestAgent.role) {
+            warnings.push(`Agent ${planAgent.slug} role "${manifestAgent.role}" is not a recognized role; imported as "${importedRole}".`);
+          }
           const patch = {
             name: planAgent.plannedName,
-            role: manifestAgent.role,
+            role: importedRole,
             title: manifestAgent.title,
             icon: manifestAgent.icon,
             capabilities: manifestAgent.capabilities,

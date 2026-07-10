@@ -19,6 +19,7 @@ import {
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   agentCapabilitiesMatch,
+  coerceAgentRole,
   getAgentWorkEligibility,
   isUuidLike,
   normalizeAgentUrlKey,
@@ -168,7 +169,7 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
 
   return {
     name: snapshot.name,
-    role: snapshot.role,
+    role: coerceAgentRole(snapshot.role),
     title: typeof snapshot.title === "string" || snapshot.title === null ? snapshot.title : null,
     reportsTo:
       typeof snapshot.reportsTo === "string" || snapshot.reportsTo === null ? snapshot.reportsTo : null,

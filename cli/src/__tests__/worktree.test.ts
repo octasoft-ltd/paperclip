@@ -355,7 +355,7 @@ describe("worktree helpers", () => {
           id: idleAgentId,
           companyId,
           name: "Reviewer",
-          role: "reviewer",
+          role: "qa",
           status: "idle",
           adapterType: "codex_local",
           adapterConfig: {},

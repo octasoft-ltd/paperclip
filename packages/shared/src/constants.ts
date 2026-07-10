@@ -51,12 +51,25 @@ export const AGENT_ROLES = [
   "engineer",
   "designer",
   "pm",
+  "planner",
   "qa",
   "devops",
   "researcher",
   "general",
 ] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
+
+export function isAgentRole(value: unknown): value is AgentRole {
+  return typeof value === "string" && (AGENT_ROLES as readonly string[]).includes(value);
+}
+
+/**
+ * Coerces untrusted role input (legacy rows, imports, plugin declarations,
+ * approval payloads) to a known agent role, falling back to "general".
+ */
+export function coerceAgentRole(value: unknown, fallback: AgentRole = "general"): AgentRole {
+  return isAgentRole(value) ? value : fallback;
+}
 
 export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   ceo: "CEO",
@@ -67,6 +80,7 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   engineer: "Engineer",
   designer: "Designer",
   pm: "PM",
+  planner: "Planner",
   qa: "QA",
   devops: "DevOps",
   researcher: "Researcher",
