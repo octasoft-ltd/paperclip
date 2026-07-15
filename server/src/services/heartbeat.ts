@@ -152,6 +152,7 @@ import {
   readContinuationAttempt,
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+import { computeWorkspaceValidationFingerprint } from "./recovery/workspace-validation-fingerprint.js";
 import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
@@ -8914,24 +8915,84 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const logEntry = formatRuntimeWorkspaceWarningLog(warning);
         await onLog(logEntry.stream, logEntry.chunk);
       }
-      await assertGitSensitiveAdapterWorkspaceValid({
-        adapterType: agent.adapterType,
-        agentId: agent.id,
-        issue: issueRef
-          ? {
-              id: issueRef.id,
-              identifier: issueRef.identifier,
-              projectId: issueRef.projectId,
-              projectWorkspaceId: issueRef.projectWorkspaceId,
-            }
-          : null,
-        resolvedWorkspace,
-        executionWorkspace,
-        persistedExecutionWorkspace,
-        executionTarget,
-        environmentDriver: selectedEnvironment.driver,
-        leaseMetadata: activeEnvironmentLease.lease.metadata,
-      });
+      try {
+        await assertGitSensitiveAdapterWorkspaceValid({
+          adapterType: agent.adapterType,
+          agentId: agent.id,
+          issue: issueRef
+            ? {
+                id: issueRef.id,
+                identifier: issueRef.identifier,
+                projectId: issueRef.projectId,
+                projectWorkspaceId: issueRef.projectWorkspaceId,
+              }
+            : null,
+          resolvedWorkspace,
+          executionWorkspace,
+          persistedExecutionWorkspace,
+          executionTarget,
+          environmentDriver: selectedEnvironment.driver,
+          leaseMetadata: activeEnvironmentLease.lease.metadata,
+        });
+      } catch (validationErr) {
+        // Enforce the manual_repair_required recovery wakePolicy as a launch gate:
+        // when this exact broken workspace was already flagged (same validation
+        // fingerprint, gate still armed), record that the relaunch was gated so it is
+        // observable and the recovery escalation suppresses the duplicate system
+        // comment instead of re-posting it on every wake (OCT-1445). The run still
+        // fails with workspace_validation_failed so the existing block/repair path is
+        // preserved — the gate stops the visible "loop", not the safety check.
+        if (isWorkspaceValidationFailure(validationErr) && issueId) {
+          const fingerprint = computeWorkspaceValidationFingerprint(
+            parseObject(validationErr.resultJson).workspaceValidation,
+          );
+          const gate = await recovery
+            .resolveWorkspaceValidationLaunchGate({
+              companyId: agent.companyId,
+              issueId,
+              fingerprint,
+            })
+            .catch((gateErr) => {
+              logger.warn(
+                { err: gateErr, runId: run.id, issueId },
+                "failed to resolve workspace_validation launch gate; treating launch as ungated",
+              );
+              return { gated: false, recoveryActionId: null, attemptCount: null };
+            });
+          if (gate.gated) {
+            validationErr.resultJson.workspaceValidationLaunchGated = true;
+            validationErr.resultJson.workspaceValidationFingerprint = fingerprint;
+            validationErr.resultJson.workspaceValidationRecoveryActionId = gate.recoveryActionId;
+            logger.info(
+              {
+                runId: run.id,
+                issueId,
+                agentId: agent.id,
+                adapterType: agent.adapterType,
+                recoveryActionId: gate.recoveryActionId,
+                recoveryAttemptCount: gate.attemptCount,
+                workspaceValidationFingerprint: fingerprint,
+              },
+              "manual_repair_required gate active: skipping git-sensitive adapter launch for unchanged workspace_validation failure",
+            );
+            await appendRunEvent(run, seq++, {
+              eventType: "info",
+              stream: "system",
+              level: "warn",
+              message:
+                "Paperclip skipped launching the local adapter: the issue workspace is still awaiting manual repair " +
+                "(manual_repair_required recovery gate). Repair the workspace link, cwd, or git checkout, then move the " +
+                "issue out of `blocked` to re-arm.",
+            }).catch((eventErr) => {
+              logger.warn(
+                { err: eventErr, runId: run.id, issueId },
+                "failed to append workspace_validation launch-gate run event",
+              );
+            });
+          }
+        }
+        throw validationErr;
+      }
       const adapterEnv = Object.fromEntries(
         Object.entries(parseObject(resolvedConfig.env)).filter(
           (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
@@ -10133,6 +10194,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
 
     if (promotionResult?.kind === "blocked") {
+      const workspaceValidationFingerprint =
+        promotionResult.recoveryCause === WORKSPACE_VALIDATION_RECOVERY_CAUSE
+          ? computeWorkspaceValidationFingerprint(parseObject(run.resultJson).workspaceValidation)
+          : null;
       await recovery.escalateStrandedAssignedIssue({
         issue: promotionResult.issue,
         previousStatus: promotionResult.previousStatus as "todo" | "in_progress",
@@ -10142,6 +10207,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           promotionResult.recoveryCause === WORKSPACE_VALIDATION_RECOVERY_CAUSE
             ? WORKSPACE_VALIDATION_RECOVERY_CAUSE
             : undefined,
+        workspaceValidationFingerprint,
       });
       return;
     }
