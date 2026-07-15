@@ -53,6 +53,7 @@ import {
   isStrandedIssueRecoveryOriginKind,
   parseIssueGraphLivenessIncidentKey,
 } from "./origins.js";
+import { computeWorkspaceValidationFingerprint } from "./workspace-validation-fingerprint.js";
 import {
   classifyIssueGraphLiveness,
   type IssueLivenessFinding,
@@ -2252,6 +2253,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     previousStatus: "todo" | "in_progress";
     recoveryCause: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    workspaceValidationFingerprint?: string | null;
   }) {
     const context = parseObject(input.latestRun?.contextSnapshot);
     return {
@@ -2264,6 +2266,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       latestRunErrorCode: input.latestRun?.errorCode ?? null,
       retryReason: readNonEmptyString(context.retryReason) ?? null,
       recoveryCause: input.recoveryCause,
+      // Stable identity of a workspace_validation_failed pre-launch failure. The
+      // launch gate compares this to decide whether a fresh wake is the exact same
+      // broken workspace it already flagged (skip the duplicate escalation) or a
+      // changed binding/worktree state (re-arm). Null for other recovery causes.
+      workspaceValidationFingerprint: input.workspaceValidationFingerprint ?? null,
       sourceRunId: input.successfulRunHandoffEvidence?.sourceRunId ?? null,
       correctiveRunId: input.successfulRunHandoffEvidence?.correctiveRunId ?? null,
       missingDisposition: input.successfulRunHandoffEvidence?.missingDisposition ?? null,
@@ -2278,6 +2285,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     previousStatus: "todo" | "in_progress";
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    workspaceValidationFingerprint?: string | null;
   }) {
     const recoveryCause = input.recoveryCause ?? "stranded_assigned_issue";
     const ownerAgentId = await resolveStrandedIssueRecoveryOwnerAgentId(input.issue);
@@ -2301,6 +2309,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         previousStatus: input.previousStatus,
         recoveryCause,
         successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+        workspaceValidationFingerprint: input.workspaceValidationFingerprint,
       }),
       nextAction: recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
         ? "Choose and record a valid issue disposition without copying transcript content."
@@ -2482,6 +2491,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     comment?: string;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
+    workspaceValidationFingerprint?: string | null;
   }) {
     if (isStrandedIssueRecoveryIssue(input.issue)) {
       return escalateStrandedRecoveryIssueInPlace({
@@ -2492,12 +2502,30 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     const recoveryCause = input.recoveryCause ?? "stranded_assigned_issue";
+    const isWorkspaceValidation = recoveryCause === "workspace_validation_failed";
+    const newWorkspaceValidationFingerprint = input.workspaceValidationFingerprint ?? null;
+
+    // Read the fingerprint of the currently-armed workspace_validation gate BEFORE
+    // the upsert overwrites the evidence, so we can tell an exact repeat (skip the
+    // duplicate "stopped before launching…" comment) from a re-arm after the
+    // workspace binding/worktree state changed (post a fresh comment).
+    const priorWorkspaceValidationFingerprint = isWorkspaceValidation
+      ? await recoveryActionsSvc
+          .getActiveForIssue(input.issue.companyId, input.issue.id)
+          .then((prior) =>
+            prior && prior.kind === "workspace_validation"
+              ? readNonEmptyString(parseObject(prior.evidence).workspaceValidationFingerprint) ?? null
+              : null,
+          )
+      : null;
+
     const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
       issue: input.issue,
       previousStatus: input.previousStatus,
       latestRun: input.latestRun,
       recoveryCause,
       successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+      workspaceValidationFingerprint: newWorkspaceValidationFingerprint,
     });
     const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
     const updated = await issuesSvc.update(input.issue.id, {
@@ -2541,27 +2569,47 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         "- Next action: a board operator should assign an invokable recovery owner, fix the agent/runtime state, or record an intentional manual resolution.",
       ].join("\n");
 
-    const shouldPostEscalationComment =
-      recoveryAction.attemptCount === 1 ||
-      input.recoveryCause === "workspace_validation_failed";
+    // Workspace-validation failures share one source-scoped recovery action, so its
+    // id is stable across distinct broken states. Gate the "stopped before
+    // launching…" comment on the validation fingerprint instead: arm on the first
+    // failure, re-arm when the workspace binding/worktree state changes, and suppress
+    // exact repeats — the unbounded relaunch "loop" (OCT-1443 / OCT-1445). The
+    // fingerprint is persisted on the recovery action, so the gate survives restarts.
+    // When no fingerprint could be computed (null), fall back to the legacy
+    // action-id marker dedupe so we never lose spam protection.
+    const useWorkspaceValidationFingerprintGate =
+      isWorkspaceValidation && newWorkspaceValidationFingerprint != null;
+    const workspaceValidationFingerprintUnchanged =
+      useWorkspaceValidationFingerprintGate &&
+      priorWorkspaceValidationFingerprint != null &&
+      priorWorkspaceValidationFingerprint === newWorkspaceValidationFingerprint;
+
+    const shouldPostEscalationComment = isWorkspaceValidation
+      ? !workspaceValidationFingerprintUnchanged
+      : recoveryAction.attemptCount === 1;
     if (shouldPostEscalationComment) {
       const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
 
-      const hasEscalationComment = await db
-        .select({ id: issueComments.id, body: issueComments.body, metadata: issueComments.metadata })
-        .from(issueComments)
-        .where(
-          and(
-            eq(issueComments.issueId, input.issue.id),
-            eq(issueComments.authorType, "system"),
-          ),
-        )
-        .orderBy(desc(issueComments.createdAt))
-        .limit(50)
-        .then((rows) => rows.some((row) =>
-          (row.body ?? "").includes(escalationCommentMarker) ||
-          noticeMetadataReferencesRecoveryAction(row.metadata, recoveryAction.id),
-        ));
+      // A fingerprint-gated re-arm must post even though the (stable) recovery action
+      // id already appears on an earlier comment, so skip the marker scan in that
+      // case; the fingerprint gate above already blocks unchanged repeats.
+      const hasEscalationComment = useWorkspaceValidationFingerprintGate
+        ? false
+        : await db
+            .select({ id: issueComments.id, body: issueComments.body, metadata: issueComments.metadata })
+            .from(issueComments)
+            .where(
+              and(
+                eq(issueComments.issueId, input.issue.id),
+                eq(issueComments.authorType, "system"),
+              ),
+            )
+            .orderBy(desc(issueComments.createdAt))
+            .limit(50)
+            .then((rows) => rows.some((row) =>
+              (row.body ?? "").includes(escalationCommentMarker) ||
+              noticeMetadataReferencesRecoveryAction(row.metadata, recoveryAction.id),
+            ));
 
       if (!hasEscalationComment) {
         if (notice) {
@@ -3921,10 +3969,44 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return result;
   }
 
+  /**
+   * Consult the `manual_repair_required` workspace-validation gate for an issue.
+   *
+   * Returns `gated: true` only when there is an active `workspace_validation`
+   * recovery action whose wake policy is `manual_repair_required` and whose stored
+   * validation fingerprint matches `fingerprint` — i.e. the exact broken workspace
+   * we already flagged. A null/absent fingerprint, a resolved action, a re-armed
+   * fingerprint, or a changed binding all report `gated: false` so the caller fails
+   * open and lets the normal validation path re-arm.
+   */
+  async function resolveWorkspaceValidationLaunchGate(input: {
+    companyId: string;
+    issueId: string;
+    fingerprint: string | null;
+  }): Promise<{ gated: boolean; recoveryActionId: string | null; attemptCount: number | null }> {
+    if (!input.fingerprint) {
+      return { gated: false, recoveryActionId: null, attemptCount: null };
+    }
+    const active = await recoveryActionsSvc.getActiveForIssue(input.companyId, input.issueId);
+    if (!active || active.kind !== "workspace_validation") {
+      return { gated: false, recoveryActionId: active?.id ?? null, attemptCount: active?.attemptCount ?? null };
+    }
+    const armed = parseObject(active.wakePolicy).type === "manual_repair_required";
+    const storedFingerprint = readNonEmptyString(
+      parseObject(active.evidence).workspaceValidationFingerprint,
+    );
+    return {
+      gated: armed && storedFingerprint === input.fingerprint,
+      recoveryActionId: active.id,
+      attemptCount: active.attemptCount,
+    };
+  }
+
   return {
     buildRunOutputSilence,
     escalateStrandedRecoveryIssueInPlace,
     escalateStrandedAssignedIssue,
+    resolveWorkspaceValidationLaunchGate,
     recordWatchdogDecision,
     scanSilentActiveRuns,
     reconcileStrandedAssignedIssues,
